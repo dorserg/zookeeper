@@ -24,7 +24,6 @@ import java.io.BufferedWriter;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintWriter;
-import java.io.StringWriter;
 import java.io.Writer;
 import java.lang.management.ManagementFactory;
 import java.lang.management.OperatingSystemMXBean;
@@ -48,6 +47,7 @@ import org.apache.zookeeper.proto.ReplyHeader;
 import org.apache.zookeeper.proto.WatcherEvent;
 import org.apache.zookeeper.server.quorum.Leader;
 import org.apache.zookeeper.server.quorum.LeaderZooKeeperServer;
+import org.apache.zookeeper.server.quorum.ReadOnlyZooKeeperServer;
 import org.jboss.netty.buffer.ChannelBuffer;
 import org.jboss.netty.buffer.ChannelBuffers;
 import org.jboss.netty.channel.Channel;
@@ -590,6 +590,23 @@ public class NettyServerCnxn extends ServerCnxn {
 
     }
 
+    private class IsroCommand extends CommandThread {
+
+        public IsroCommand(PrintWriter pw) {
+            super(pw);
+        }
+
+        @Override
+        public void commandRun() {
+            if (zkServer == null) {
+                pw.print("null");
+            } else if (zkServer instanceof ReadOnlyZooKeeperServer) {
+                pw.print("ro");
+            } else {
+                pw.print("rw");
+            }
+        }
+    }
 
     /** Return if four letter word found and responded to, otw false **/
     private boolean checkFourLetterWord(final Channel channel,
@@ -661,6 +678,10 @@ public class NettyServerCnxn extends ServerCnxn {
         } else if (len == mntrCmd) {
             MonitorCommand mntr = new MonitorCommand(pwriter);
             mntr.start();
+            return true;
+        } else if (len == isroCmd) {
+            IsroCommand isro = new IsroCommand(pwriter);
+            isro.start();
             return true;
         }
         return false;
