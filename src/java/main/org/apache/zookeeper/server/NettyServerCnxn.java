@@ -456,6 +456,10 @@ public class NettyServerCnxn extends ServerCnxn {
             else {   
                 pw.print("Zookeeper version: ");
                 pw.println(Version.getFullVersion());
+                if (zkServer instanceof ReadOnlyZooKeeperServer) {
+                    pw.println("READ-ONLY mode; serving only " +
+                               "read-only clients");
+                }
                 if (len == statCmd) {
                     LOG.info("Stat command output");
                     pw.println("Clients:");
