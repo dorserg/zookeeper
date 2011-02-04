@@ -21,7 +21,7 @@ ZOOPORT=22181
 
 if [ "x$1" == "x" ]
 then
-    echo "USAGE: $0 startClean|start|stop hostPorts"
+    echo "USAGE: $0 startClean|start|startPeer|stop hostPorts"
     exit 2
 fi
 
@@ -148,6 +148,21 @@ start|startClean)
         echo -n " ZooKeeper server started"
     else
         echo -n " ZooKeeper server NOT started"
+    fi
+
+    ;;
+startPeer)
+    if [ "x${base_dir}" == "x" ]
+    then
+        echo "this target is for unit tests only"
+        exit 2
+    else
+        mkdir -p /tmp/zkdata
+        rm -f /tmp/zkdata/myid && echo 1 > /tmp/zkdata/myid
+        java -cp "$CLASSPATH" org.apache.zookeeper.server.quorum.QuorumPeerMain ${base_dir}/src/c/tests/quorum.cfg &> "${base_dir}/build/tmp/zk.log" &
+        pid=$!
+        echo -n $pid > "${base_dir}/build/tmp/zk.pid"
+        sleep 3 # wait until read-only server is up
     fi
 
     ;;

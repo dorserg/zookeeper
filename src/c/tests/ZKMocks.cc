@@ -57,10 +57,15 @@ HandshakeRequest* HandshakeRequest::parse(const std::string& buf){
     offset+=sizeof(req->passwd_len);
     
     memcpy(req->passwd,buf.data()+offset,sizeof(req->passwd));
+    offset+=sizeof(req->passwd);
+
+    memcpy(&req->readOnly,buf.data()+offset,sizeof(req->readOnly));
+
     if(testClientId.client_id==req->sessionId &&
             !memcmp(testClientId.passwd,req->passwd,sizeof(req->passwd)))
         return req.release();
     // the request didn't match -- may not be a handshake request after all
+
     return 0;
 }
 
@@ -327,6 +332,7 @@ string HandshakeResponse::toString() const {
     tmp=htonl(passwd_len);
     buf.append((char*)&tmp,sizeof(tmp));
     buf.append(passwd,sizeof(passwd));
+    buf.append(&readOnly,sizeof(readOnly));
     // finally set the buffer length
     tmp=htonl(buf.size()+sizeof(tmp));
     buf.insert(0,(char*)&tmp, sizeof(tmp));

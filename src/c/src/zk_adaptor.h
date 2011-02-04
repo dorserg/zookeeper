@@ -37,6 +37,7 @@
 #define CONNECTING_STATE_DEF 1
 #define ASSOCIATING_STATE_DEF 2
 #define CONNECTED_STATE_DEF 3
+#define READONLY_STATE_DEF 4
 
 /* zookeeper event type constants */
 #define CREATED_EVENT_DEF 1
@@ -125,7 +126,7 @@ typedef struct _buffer_list {
 } buffer_list_t;
 
 /* the size of connect request */
-#define HANDSHAKE_REQ_SIZE 44
+#define HANDSHAKE_REQ_SIZE 45
 /* connect request */
 struct connect_req {
     int32_t protocolVersion;
@@ -134,6 +135,7 @@ struct connect_req {
     int64_t sessionId;
     int32_t passwd_len;
     char passwd[16];
+    char readOnly;
 };
 
 /* the connect response */
@@ -144,6 +146,7 @@ struct prime_struct {
     int64_t sessionId;
     int32_t passwd_len;
     char passwd[16];
+    char readOnly;
 }; 
 
 #ifdef THREADED
@@ -189,12 +192,18 @@ struct _zhandle {
     completion_head_t sent_requests; /* The outstanding requests */
     completion_head_t completions_to_process; /* completions that are ready to run */
     int connect_index; /* The index of the address to connect to */
+
+    /* read-only mode specific fields */
+    int next_rw_index; /* The index of next address to try when seeking for r/w server */
+    struct timeval last_ping_rw; /* The last time we checked server for being r/w */
+    int ping_rw_timeout; /* The time that can go by before checking next server */
+
     clientid_t client_id;
     long long last_zxid;
     int outstanding_sync; /* Number of outstanding synchronous requests */
     struct _buffer_list primer_buffer; /* The buffer used for the handshake at the start of a connection */
     struct prime_struct primer_storage; /* the connect response */
-    char primer_storage_buffer[40]; /* the true size of primer_storage */
+    char primer_storage_buffer[41]; /* the true size of primer_storage */
     volatile int state;
     void *context;
     auth_list_head_t auth_h; /* authentication data list */
@@ -208,14 +217,18 @@ struct _zhandle {
      * call returned while there was at least one unprocessed server response 
      * available in the socket recv buffer */
     struct timeval socket_readable;
-    
+
     zk_hashtable* active_node_watchers;   
     zk_hashtable* active_exist_watchers;
     zk_hashtable* active_child_watchers;
     /** used for chroot path at the client side **/
     char *chroot;
-};
 
+    /** Indicates if this client is allowed to go to r/o mode */
+    char allow_read_only;
+    /** Indicates if we connected to a majority server before */
+    char seen_rw_server_before;
+};
 
 int adaptor_init(zhandle_t *zh);
 void adaptor_finish(zhandle_t *zh);

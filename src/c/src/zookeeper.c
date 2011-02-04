@@ -72,6 +72,8 @@ const int ZOO_AUTH_FAILED_STATE = AUTH_FAILED_STATE_DEF;
 const int ZOO_CONNECTING_STATE = CONNECTING_STATE_DEF;
 const int ZOO_ASSOCIATING_STATE = ASSOCIATING_STATE_DEF;
 const int ZOO_CONNECTED_STATE = CONNECTED_STATE_DEF;
+const int ZOO_READONLY_STATE = READONLY_STATE_DEF;
+
 static __attribute__ ((unused)) const char* state2String(int state){
     switch(state){
     case 0:
@@ -82,6 +84,8 @@ static __attribute__ ((unused)) const char* state2String(int state){
         return "ZOO_ASSOCIATING_STATE";
     case CONNECTED_STATE_DEF:
         return "ZOO_CONNECTED_STATE";
+    case READONLY_STATE_DEF:
+        return "ZOO_READONLY_STATE";
     case EXPIRED_SESSION_STATE_DEF:
         return "ZOO_EXPIRED_SESSION_STATE";
     case AUTH_FAILED_STATE_DEF:
@@ -709,8 +713,17 @@ static void log_env() {
  * Create a zookeeper handle associated with the given host and port.
  */
 zhandle_t *zookeeper_init(const char *host, watcher_fn watcher,
-  int recv_timeout, const clientid_t *clientid, void *context, int flags)
-{
+  int recv_timeout, const clientid_t *clientid, void *context, int flags) {
+  return zookeeper_init_ro(host, watcher, recv_timeout,
+		  clientid, context, 0, flags);
+}
+
+/**
+ * Create a zookeeper handle associated with the given host and port.
+ */
+zhandle_t* zookeeper_init_ro(const char* host, watcher_fn watcher,
+  int recv_timeout, const clientid_t* clientid, void* context,
+  char allow_read_only, int flags) {
     int errnosave = 0;
     zhandle_t *zh = NULL;
     char *index_chroot = NULL;
@@ -718,7 +731,7 @@ zhandle_t *zookeeper_init(const char *host, watcher_fn watcher,
     log_env();
 
     LOG_INFO(("Initiating client connection, host=%s sessionTimeout=%d watcher=%p"
-          " sessionId=%#llx sessionPasswd=%s context=%p flags=%d",
+          " sessionId=%#llx sessionPasswd=%s context=%p readOnly=%d flags=%d",
               host,
               recv_timeout,
               watcher,
@@ -726,6 +739,7 @@ zhandle_t *zookeeper_init(const char *host, watcher_fn watcher,
               ((clientid == 0) || (clientid->passwd == 0) ?
                "<null>" : "<hidden>"),
               context,
+              allow_read_only,
               flags));
 
     zh = calloc(1, sizeof(*zh));
@@ -736,6 +750,9 @@ zhandle_t *zookeeper_init(const char *host, watcher_fn watcher,
     zh->state = 0;
     zh->context = context;
     zh->recv_timeout = recv_timeout;
+    zh->allow_read_only = allow_read_only;
+    // non-zero clientid implies we've seen r/w server already
+    zh->seen_rw_server_before = (clientid != 0 && clientid->client_id != 0);
     init_auth_info(&zh->auth_h);
     if (watcher) {
        zh->watcher = watcher;
@@ -776,6 +793,7 @@ zhandle_t *zookeeper_init(const char *host, watcher_fn watcher,
         goto abort;
     }
     zh->connect_index = 0;
+    zh->next_rw_index = 0;
     if (clientid) {
         memcpy(&zh->client_id, clientid, sizeof(zh->client_id));
     } else {
@@ -1002,7 +1020,7 @@ static int send_buffer(int fd, buffer_list_t *buff)
  * 0 if recv would block,
  * 1 if success
  */
-static int recv_buffer(int fd, buffer_list_t *buff)
+static int recv_buffer(zhandle_t* zh, buffer_list_t *buff)
 {
     int off = buff->curr_offset;
     int rc = 0;
@@ -1011,7 +1029,7 @@ static int recv_buffer(int fd, buffer_list_t *buff)
     /* if buffer is less than 4, we are reading in the length */
     if (off < 4) {
         char *buffer = (char*)&(buff->len);
-        rc = recv(fd, buffer+off, sizeof(int)-off, 0);
+        rc = recv(zh->fd, buffer+off, sizeof(int)-off, 0);
         //fprintf(LOGSTREAM, "rc = %d, off = %d, line %d\n", rc, off, __LINE__);
         switch(rc) {
         case 0:
@@ -1034,7 +1052,13 @@ static int recv_buffer(int fd, buffer_list_t *buff)
         /* want off to now represent the offset into the buffer */
         off -= sizeof(buff->len);
 
-        rc = recv(fd, buff->buffer+off, buff->len-off, 0);
+        rc = recv(zh->fd, buff->buffer+off, buff->len-off, 0);
+
+        // dirty hack to make new client work against old server
+        // old server sends 40 bytes to finish connection handshake,
+        // while we're expecting 41 (1 byte for read-only mode data)
+        if (buff == &zh->primer_buffer && rc == buff->len-1) ++rc;
+
         switch(rc) {
         case 0:
             errno = EHOSTDOWN;
@@ -1132,6 +1156,11 @@ static void cleanup_bufs(zhandle_t *zh,int callCompletion,int rc)
     }
 }
 
+// return 1 if zh's state is ZOO_CONNECTED_STATE or ZOO_READONLY_STATE, 0 otherwise
+static int is_connected(zhandle_t* zh) {
+    return (zh->state==ZOO_CONNECTED_STATE || zh->state==ZOO_READONLY_STATE);
+}
+
 static void handle_error(zhandle_t *zh,int rc)
 {
     close(zh->fd);
@@ -1139,7 +1168,7 @@ static void handle_error(zhandle_t *zh,int rc)
         LOG_DEBUG(("Calling a watcher for a ZOO_SESSION_EVENT and the state=%s",
                 state2String(zh->state)));
         PROCESS_SESSION_EVENT(zh, zh->state);
-    } else if (zh->state == ZOO_CONNECTED_STATE) {
+    } else if (is_connected(zh)) {
         LOG_DEBUG(("Calling a watcher for a ZOO_SESSION_EVENT and the state=CONNECTING_STATE"));
         PROCESS_SESSION_EVENT(zh, ZOO_CONNECTING_STATE);
     }
@@ -1339,36 +1368,44 @@ static int serialize_prime_connect(struct connect_req *req, char* buffer){
     offset = offset +  sizeof(req->passwd_len);
 
     memcpy(buffer + offset, req->passwd, sizeof(req->passwd));
+    offset = offset +  sizeof(req->passwd);
+
+    memcpy(buffer + offset, &req->readOnly, sizeof(req->readOnly));
 
     return 0;
 }
 
- static int deserialize_prime_response(struct prime_struct *req, char* buffer){
+static int deserialize_prime_response(struct prime_struct *resp, char* buffer)
+{
      //this should be the order of deserialization
      int offset = 0;
-     memcpy(&req->len, buffer + offset, sizeof(req->len));
-     offset = offset +  sizeof(req->len);
+     memcpy(&resp->len, buffer + offset, sizeof(resp->len));
+     offset = offset +  sizeof(resp->len);
 
-     req->len = ntohl(req->len);
-     memcpy(&req->protocolVersion, buffer + offset, sizeof(req->protocolVersion));
-     offset = offset +  sizeof(req->protocolVersion);
+     resp->len = ntohl(resp->len);
+     memcpy(&resp->protocolVersion, buffer + offset, sizeof(resp->protocolVersion));
+     offset = offset +  sizeof(resp->protocolVersion);
 
-     req->protocolVersion = ntohl(req->protocolVersion);
-     memcpy(&req->timeOut, buffer + offset, sizeof(req->timeOut));
-     offset = offset +  sizeof(req->timeOut);
+     resp->protocolVersion = ntohl(resp->protocolVersion);
+     memcpy(&resp->timeOut, buffer + offset, sizeof(resp->timeOut));
+     offset = offset +  sizeof(resp->timeOut);
 
-     req->timeOut = ntohl(req->timeOut);
-     memcpy(&req->sessionId, buffer + offset, sizeof(req->sessionId));
-     offset = offset +  sizeof(req->sessionId);
+     resp->timeOut = ntohl(resp->timeOut);
+     memcpy(&resp->sessionId, buffer + offset, sizeof(resp->sessionId));
+     offset = offset +  sizeof(resp->sessionId);
 
-     req->sessionId = htonll(req->sessionId);
-     memcpy(&req->passwd_len, buffer + offset, sizeof(req->passwd_len));
-     offset = offset +  sizeof(req->passwd_len);
+     resp->sessionId = htonll(resp->sessionId);
+     memcpy(&resp->passwd_len, buffer + offset, sizeof(resp->passwd_len));
+     offset = offset +  sizeof(resp->passwd_len);
 
-     req->passwd_len = ntohl(req->passwd_len);
-     memcpy(req->passwd, buffer + offset, sizeof(req->passwd));
+     resp->passwd_len = ntohl(resp->passwd_len);
+     memcpy(resp->passwd, buffer + offset, sizeof(resp->passwd));
+     offset = offset +  sizeof(resp->passwd);
+
+     memcpy(&resp->readOnly, buffer + offset, sizeof(resp->readOnly));
+
      return 0;
- }
+}
 
 static int prime_connection(zhandle_t *zh)
 {
@@ -1379,11 +1416,12 @@ static int prime_connection(zhandle_t *zh)
     int hlen = 0;
     struct connect_req req;
     req.protocolVersion = 0;
-    req.sessionId = zh->client_id.client_id;
+    req.sessionId = zh->seen_rw_server_before ? zh->client_id.client_id : 0;
     req.passwd_len = sizeof(req.passwd);
     memcpy(req.passwd, zh->client_id.passwd, sizeof(zh->client_id.passwd));
     req.timeOut = zh->recv_timeout;
     req.lastZxidSeen = zh->last_zxid;
+    req.readOnly = zh->allow_read_only;
     hlen = htonl(len);
     /* We are running fast and loose here, but this string should fit in the initial buffer! */
     rc=send(zh->fd, &hlen, sizeof(len), 0);
@@ -1396,6 +1434,7 @@ static int prime_connection(zhandle_t *zh)
     zh->state = ZOO_ASSOCIATING_STATE;
 
     zh->input_buffer = &zh->primer_buffer;
+    memset(zh->input_buffer->buffer,0,zh->input_buffer->len);
     /* This seems a bit weird to to set the offset to 4, but we already have a
      * length, so we skip reading the length (and allocating the buffer) by
      * saying that we are already at offset 4 */
@@ -1426,13 +1465,13 @@ static struct timeval get_timeval(int interval)
     return tv;
 }
 
- static int add_void_completion(zhandle_t *zh, int xid, void_completion_t dc,
-     const void *data);
- static int add_string_completion(zhandle_t *zh, int xid,
-     string_completion_t dc, const void *data);
+static int add_void_completion(zhandle_t *zh, int xid, void_completion_t dc,
+    const void *data);
+static int add_string_completion(zhandle_t *zh, int xid,
+    string_completion_t dc, const void *data);
 
- int send_ping(zhandle_t* zh)
- {
+int send_ping(zhandle_t* zh)
+{
     int rc;
     struct oarchive *oa = create_buffer_oarchive();
     struct RequestHeader h = { .xid = PING_XID, .type = PING_OP };
@@ -1448,8 +1487,39 @@ static struct timeval get_timeval(int interval)
     return rc<0 ? rc : adaptor_send_queue(zh, 0);
 }
 
- int zookeeper_interest(zhandle_t *zh, int *fd, int *interest,
-     struct timeval *tv)
+/* upper bound of a timeout for seeking for r/w server when in read-only mode */
+const int MAX_RW_TIMEOUT = 60000;
+const int MIN_RW_TIMEOUT = 200;
+
+static int ping_rw_server(zhandle_t* zh) {
+	// fprintf(stderr,"CONN TO %s\n",format_endpoint_info(&zh->addrs[zh->next_rw_index]));
+	int sock =
+		socket(zh->addrs[zh->next_rw_index].ss_family, SOCK_STREAM, 0);
+	if (sock < 0) return 0;
+	int on = 1;
+	struct timeval tv; tv.tv_sec = 1;
+	setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &on, sizeof(int));
+	setsockopt(sock,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(struct timeval));
+	setsockopt(sock,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(struct timeval));
+	if (connect(sock, (struct sockaddr*) &zh->addrs[zh->next_rw_index],
+	    sizeof(struct sockaddr_in6)) < 0) return 0;
+	if (send(sock,"isro",4,0) < 0) {
+		close(sock);
+		return 0;
+	}
+	char buf[10];
+	memset(buf,0,sizeof(buf));
+	if (recv(sock,buf,sizeof(buf),0) < 0) {
+		close(sock);
+		return 0;
+	}
+	close(sock);
+	// fprintf(stderr,"PING RESULT: %s\n", buf);
+	return (strcmp("rw",buf)==0);
+}
+
+int zookeeper_interest(zhandle_t *zh, int *fd, int *interest,
+    struct timeval *tv)
 {
     struct timeval now;
     if(zh==0 || fd==0 ||interest==0 || tv==0)
@@ -1513,6 +1583,8 @@ static struct timeval get_timeval(int interval)
         zh->last_recv = now;
         zh->last_send = now;
         zh->last_ping = now;
+        zh->last_ping_rw = now;
+        zh->ping_rw_timeout = MIN_RW_TIMEOUT;
     }
     if (zh->fd != -1) {
         int idle_recv = calculate_interval(&zh->last_recv, &now);
@@ -1530,9 +1602,10 @@ static struct timeval get_timeval(int interval)
                     __LINE__,ZOPERATIONTIMEOUT,
                     "connection timed out (exceeded timeout by %dms)",-recv_to));
         }
+
         // We only allow 1/3 of our timeout time to expire before sending
         // a PING
-        if (zh->state==ZOO_CONNECTED_STATE) {
+        if (is_connected(zh)) {
             send_to = zh->recv_timeout/3 - idle_send;
             if (send_to <= 0 && zh->sent_requests.head==0) {
 //                LOG_DEBUG(("Sending PING to %s (exceeded idle by %dms)",
@@ -1545,8 +1618,38 @@ static struct timeval get_timeval(int interval)
                 send_to = zh->recv_timeout/3;
             }
         }
+
+#define MIN(a,b) ((a)<(b)?(a):(b))
+        // If we are in read-only mode, seek for read/write server
+        if (zh->state == ZOO_READONLY_STATE) {
+            int idle_ping_rw = calculate_interval(&zh->last_ping_rw, &now);
+            if (idle_ping_rw >= zh->ping_rw_timeout) {
+                zh->last_ping_rw = now;
+                idle_ping_rw = 0;
+                zh->ping_rw_timeout =
+                    MIN(zh->ping_rw_timeout*2, MAX_RW_TIMEOUT);
+                int found = ping_rw_server(zh);
+                if (found) {
+                    zh->ping_rw_timeout = MIN_RW_TIMEOUT;
+                    LOG_INFO((
+                      "r/w server found at %s",
+                      format_endpoint_info(&zh->addrs[zh->next_rw_index])
+                    ));
+                    int cnt = zh->addrs_count;
+                    // decrease by 1 because handle_error will inc it
+                    zh->connect_index = (cnt+zh->next_rw_index-1) % cnt;
+                    handle_error(zh, ZRWSERVERFOUND);
+                } else {
+                    zh->next_rw_index =
+                        (zh->next_rw_index + 1) % zh->addrs_count;
+                }
+            }
+            send_to = MIN(send_to, zh->ping_rw_timeout-idle_ping_rw);
+        }
+
         // choose the lesser value as the timeout
-        *tv = get_timeval(recv_to < send_to? recv_to:send_to);
+        *tv = get_timeval(MIN(recv_to,send_to));
+#undef MIN
         zh->next_deadline.tv_sec = now.tv_sec + tv->tv_sec;
         zh->next_deadline.tv_usec = now.tv_usec + tv->tv_usec;
         if (zh->next_deadline.tv_usec > 1000000) {
@@ -1556,7 +1659,7 @@ static struct timeval get_timeval(int interval)
         *interest = ZOOKEEPER_READ;
         /* we are interested in a write if we are connected and have something
          * to send, or we are waiting for a connect to finish. */
-        if ((zh->to_send.head && (zh->state == ZOO_CONNECTED_STATE))
+        if ((zh->to_send.head && (is_connected(zh)))
         || zh->state == ZOO_CONNECTING_STATE) {
             *interest |= ZOOKEEPER_WRITE;
         }
@@ -1600,7 +1703,7 @@ static int check_events(zhandle_t *zh, int events)
             zh->input_buffer = allocate_buffer(0,0);
         }
 
-        rc = recv_buffer(zh->fd, zh->input_buffer);
+        rc = recv_buffer(zh, zh->input_buffer);
         if (rc < 0) {
             return handle_socket_error_msg(zh, __LINE__,ZCONNECTIONLOSS,
                 "failed while receiving a server response");
@@ -1615,7 +1718,8 @@ static int check_events(zhandle_t *zh, int events)
                 deserialize_prime_response(&zh->primer_storage, zh->primer_buffer.buffer);
                 /* We are processing the primer_buffer, so we need to finish
                  * the connection handshake */
-                oldid = zh->client_id.client_id;
+                oldid = zh->seen_rw_server_before ? zh->client_id.client_id : 0;
+                zh->seen_rw_server_before |= !zh->primer_storage.readOnly;
                 newid = zh->primer_storage.sessionId;
                 if (oldid != 0 && oldid != newid) {
                     zh->state = ZOO_EXPIRED_SESSION_STATE;
@@ -1628,10 +1732,12 @@ static int check_events(zhandle_t *zh, int events)
                  
                     memcpy(zh->client_id.passwd, &zh->primer_storage.passwd,
                            sizeof(zh->client_id.passwd));
-                    zh->state = ZOO_CONNECTED_STATE;
-                    LOG_INFO(("session establishment complete on server [%s], sessionId=%#llx, negotiated timeout=%d",
+                    zh->state = zh->primer_storage.readOnly ?
+                        ZOO_READONLY_STATE : ZOO_CONNECTED_STATE;
+                    LOG_INFO(("session establishment complete on server [%s], sessionId=%#llx, negotiated timeout=%d %s",
                               format_endpoint_info(&zh->addrs[zh->connect_index]),
-                              newid, zh->recv_timeout));
+                              newid, zh->recv_timeout,
+                              (zh->primer_storage.readOnly ? "(READ-ONLY mode)" : "")));
                     /* we want the auth to be sent for, but since both call push to front
                        we need to call send_watch_set first */
                     send_set_watches(zh);
@@ -1639,7 +1745,7 @@ static int check_events(zhandle_t *zh, int events)
                     send_auth_info(zh);
                     LOG_DEBUG(("Calling a watcher for a ZOO_SESSION_EVENT and the state=ZOO_CONNECTED_STATE"));
                     zh->input_buffer = 0; // just in case the watcher calls zookeeper_process() again
-                    PROCESS_SESSION_EVENT(zh, ZOO_CONNECTED_STATE);
+                    PROCESS_SESSION_EVENT(zh, zh->state);
                 }
             }
             zh->input_buffer = 0;
@@ -2107,7 +2213,8 @@ int zookeeper_process(zhandle_t *zh, int events)
     if (process_async(zh->outstanding_sync)) {
         process_completions(zh);
     }
-    return api_epilog(zh,ZOK);}
+    return api_epilog(zh,ZOK);
+}
 
 int zoo_state(zhandle_t *zh)
 {
@@ -2299,7 +2406,7 @@ int zookeeper_close(zhandle_t *zh)
         adaptor_finish(zh);
         return ZOK;
     }
-    if(zh->state==ZOO_CONNECTED_STATE){
+    if(is_connected(zh)){
         struct oarchive *oa;
         struct RequestHeader h = { .xid = get_xid(), .type = CLOSE_OP};
         LOG_INFO(("Closing zookeeper sessionId=%#llx to [%s]\n",
@@ -2828,7 +2935,7 @@ int flush_send_queue(zhandle_t*zh, int timeout)
     // we use a recursive lock instead and only dequeue the buffer if a send was
     // successful
     lock_buffer_list(&zh->to_send);
-    while (zh->to_send.head != 0&& zh->state == ZOO_CONNECTED_STATE) {
+    while (zh->to_send.head != 0 && is_connected(zh)) {
         if(timeout!=0){
             int elapsed;
             struct pollfd fds;
@@ -2921,6 +3028,8 @@ const char* zerror(int c)
       return "(not error) no server responses to process";
     case ZSESSIONMOVED:
       return "session moved to another server, so operation is ignored";
+    case ZNOTREADONLY:
+      return "state-changing request is passed to read-only server";
     }
     if (c > 0) {
       return strerror(c);
@@ -2967,7 +3076,7 @@ int zoo_add_auth(zhandle_t *zh,const char* scheme,const char* cert,
     add_last_auth(&zh->auth_h, authinfo);
     zoo_unlock_auth(zh);
 
-    if(zh->state == ZOO_CONNECTED_STATE || zh->state == ZOO_ASSOCIATING_STATE)
+    if (is_connected(zh) || zh->state == ZOO_ASSOCIATING_STATE)
         return send_last_auth_info(zh);
 
     return ZOK;

@@ -381,3 +381,4 @@ void leave_critical(zhandle_t* zh)
     if(adaptor)
         pthread_mutex_unlock(&adaptor->zh_lock);    
 }
+

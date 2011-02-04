@@ -109,7 +109,9 @@ enum ZOO_ERRORS {
   ZAUTHFAILED = -115, /*!< Client authentication failed */
   ZCLOSING = -116, /*!< ZooKeeper is closing */
   ZNOTHING = -117, /*!< (not error) no server responses to process */
-  ZSESSIONMOVED = -118 /*!<session moved to another server, so operation is ignored */ 
+  ZSESSIONMOVED = -118, /*!< session moved to another server, so operation is ignored */
+  ZNOTREADONLY = -119, /*!< state-changing request is passed to read-only server */
+  ZRWSERVERFOUND = -120 /*!< r/w server found while in r/o mode */
 };
 
 #ifdef __cplusplus
@@ -180,6 +182,7 @@ extern ZOOAPI const int ZOO_AUTH_FAILED_STATE;
 extern ZOOAPI const int ZOO_CONNECTING_STATE;
 extern ZOOAPI const int ZOO_ASSOCIATING_STATE;
 extern ZOOAPI const int ZOO_CONNECTED_STATE;
+extern ZOOAPI const int ZOO_READONLY_STATE;
 // @}
 
 /**
@@ -283,7 +286,7 @@ typedef void (*watcher_fn)(zhandle_t *zh, int type,
         int state, const char *path,void *watcherCtx);
 
 /**
- * \brief create a handle to used communicate with zookeeper.
+ * \brief create a handle used to communicate with zookeeper.
  * 
  * This method creates a new handle and a zookeeper session that corresponds
  * to that handle. Session establishment is asynchronous, meaning that the
@@ -312,6 +315,44 @@ typedef void (*watcher_fn)(zhandle_t *zh, int type,
  */
 ZOOAPI zhandle_t *zookeeper_init(const char *host, watcher_fn fn,
   int recv_timeout, const clientid_t *clientid, void *context, int flags);
+
+/**
+ * \brief create a handle used to communicate with zookeeper (added in 3.4)
+ *
+ * This method creates a new handle and a zookeeper session that corresponds
+ * to that handle. Session establishment is asynchronous, meaning that the
+ * session should not be considered established until (and unless) an
+ * event of state ZOO_CONNECTED_STATE is received.
+ * \param host comma separated host:port pairs, each corresponding to a zk
+ *   server. e.g. "127.0.0.1:3000,127.0.0.1:3001,127.0.0.1:3002"
+ * \param fn the global watcher callback function. When notifications are
+ *   triggered this function will be invoked.
+ * \param clientid the id of a previously established session that this
+ *   client will be reconnecting to. Pass 0 if not reconnecting to a previous
+ *   session. Clients can access the session id of an established, valid,
+ *   connection by calling \ref zoo_client_id. If the session corresponding to
+ *   the specified clientid has expired, or if the clientid is invalid for
+ *   any reason, the returned zhandle_t will be invalid -- the zhandle_t
+ *   state will indicate the reason for failure (typically
+ *   ZOO_EXPIRED_SESSION_STATE).
+ * \param context the handback object that will be associated with this instance
+ *   of zhandle_t. Application can access it (for example, in the watcher
+ *   callback) using \ref zoo_get_context. The object is not used by zookeeper
+ *   internally and can be null.
+ * \param allow_read_only whether the created client is allowed to go to
+ *   read-only mode in case of partitioning. Read-only mode basically means
+ *   that if the client can't find any majority servers but there's partitioned
+ *   server it could reach, it connects to one in read-only mode, i.e. read
+ *   requests are allowed while write requests are not. It continues seeking
+ *   for majority in the background.
+ * \param flags reserved for future use. Should be set to zero.
+ * \return a pointer to the opaque zhandle structure. If it fails to create
+ * a new zhandle the function returns NULL and the errno variable
+ * indicates the reason.
+ */
+ZOOAPI zhandle_t* zookeeper_init_ro(const char* host, watcher_fn fn,
+  int recv_timeout, const clientid_t* clientid, void* context,
+  char allow_read_only, int flags);
 
 /**
  * \brief close the zookeeper handle and free up any resources.
