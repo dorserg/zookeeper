@@ -604,7 +604,7 @@
       </listitem>
 
       <listitem>
-        <para>Watch for changes on "ELECTION/n_j", where j is the smallest
+        <para>Watch for changes on "ELECTION/n_j", where j is the highest
         sequence number such that j &lt; i and n_j is a znode in C;</para>
       </listitem>
     </orderedlist>
@@ -623,7 +623,7 @@
 
       <listitem>
         <para>Otherwise, watch for changes on "ELECTION/n_j", where j is the
-        smallest sequence number such that j &lt; i and n_j is a znode in C;
+        highest sequence number such that j &lt; i and n_j is a znode in C;
         </para>
       </listitem>
     </orderedlist>
@@ -632,6 +632,11 @@
     children does not imply that the creator of this znode is aware that it is
     the current leader. Applications may consider creating a separate to znode
     to acknowledge that the leader has executed the leader procedure. </para>
+  </section>
+  <section id="sc_readOnlyRecipes">
+      <title>Recipes and Read-Only Mode</title>
+      <para>You can read about recipes rewritten with regard to read-only mode
+          <ulink url="zookeeperReadOnly.html#ch_useCases">here</ulink>.</para>
   </section>
   </section>
 </article>

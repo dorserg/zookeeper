@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Copyright 2002-2004 The Apache Software Foundation
+
+  Licensed under the Apache License, Version 2.0 (the "License");
+  you may not use this file except in compliance with the License.
+  You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing, software
+  distributed under the License is distributed on an "AS IS" BASIS,
+  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+  See the License for the specific language governing permissions and
+  limitations under the License.
+-->
+
+<!DOCTYPE article PUBLIC "-//OASIS//DTD Simplified DocBook XML V1.0//EN"
+"http://www.oasis-open.org/docbook/xml/simple/1.0/sdocbook.dtd">
+<article id="bk_GettStartedGuide">
+  <title>ZooKeeper Read-Only Mode</title>
+
+  <articleinfo>
+    <legalnotice>
+      <para>Licensed under the Apache License, Version 2.0 (the "License"); you
+	may not use this file except in compliance with the License. You may
+	obtain a copy of the License
+	at <ulink url="http://www.apache.org/licenses/LICENSE-2.0">http://www.apache.org/licenses/LICENSE-2.0</ulink>.</para>
+
+      <para>Unless required by applicable law or agreed to in writing, software
+      distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
+      WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
+      License for the specific language governing permissions and limitations
+      under the License.</para>
+    </legalnotice>
+
+    <abstract>
+        <para>This guide contains information about using read-only mode in ZooKeeper</para>
+    </abstract>
+  </articleinfo>
+
+  <section id="ch_introduction">
+      <title>Read-Only Mode: ZooKeeper service made accessible 24x7</title>
+      <para><emphasis role="bold">New in 3.4.0</emphasis></para>
+      <para>When a ZooKeeper server loses contact with over half of the
+          other servers in an ensemble ('loses a quorum'), it stops
+          serving clients since it can't provide them with up-to-date
+          view of the system. For some applications however, it would
+          be beneficial if a server still responded to read requests
+          when the quorum is lost, but caused an error condition when a
+          write request was attempted. Such an ability is present in
+          ZooKeeper and is called read-only mode.</para>
+  </section>
+
+  <section id="ch_usageNotes">
+      <title>Using Read-Only Mode</title>
+      <para>Enabling read-only mode in your client means the following. If the
+          client is connected to a in-majority server it acts as usual, but if
+          some sort of partitioning occurs in the ZooKeeper ensemble and the
+          client can't find majority server it connects to a partitioned server
+          in read-only mode. In the background it will continue seeking for
+          majority server and will eventually reconnect to one that's
+          found.</para>
+      <para>In contrast, a usual (i.e. with read-only mode disabled) client
+          can't connect to a partitioned server, so when partitioning occurs
+          such client can't issue any requests. Application developers will
+          decide which client to use -- r-o enabled or not -- i.e. they'll
+          choose whether to have guaranteed consistent view of system, or agree
+          to sometimes have outdated view in return for read access.</para>
+      <section id="ch_API">
+          <title>API</title>
+          <para>Enabling read-only mode in your application is just a matter of
+              passing a boolean parameter to a ZooKeeper client during its
+              initialization.</para>
+          <itemizedlist>
+              <listitem>
+                  <para>For Java binding: instead of instantiating ZooKeeper object like this:</para>
+                  <programlisting>zk = new ZooKeeper(connString, sessTimeout, watcher);</programlisting>
+                  <para>add additional boolean parameter to the end:</para>
+                  <programlisting>zk = new ZooKeeper(connString, sessTimeout, watcher, <emphasis role="bold">true</emphasis>);</programlisting>
+              </listitem>
+              <listitem>
+                  <para>For C binding it's even more explicit, since C doesn't allow overloaded functions. Instead of</para>
+                  <programlisting>zh = zookeeper_init(conn_string,watcher,sess_to,cli_id,ctxt,flags);</programlisting>
+                  <para>write this (1 for true, it's pure C):</para>
+                  <programlisting>zh = zookeeper_init_ro(conn_string,watcher,sess_to,cli_id,ctxt,<emphasis role="bold">1</emphasis>,flags);</programlisting>
+              </listitem>
+          </itemizedlist>
+          <para>This will tell the client library that you want your client object
+              to go to read-only mode in case of partitioning. Remember of course,
+              that during read-only period you will have stale view of the
+              system.</para>
+          <para>To use read-only mode in command-line clients just add "-r" to the end:</para>
+          <programlisting>$ ./zkCli.sh -server 127.0.0.1:2181 -r</programlisting>
+          <programlisting>$ ./cli_mt 127.0.0.1:2181 -r</programlisting>
+      </section>
+      <section id="ch_sessions">
+          <title>Session Handling</title>
+          <itemizedlist>
+              <listitem>
+                  <para><emphasis role="bold">Session states</emphasis></para>
+                  <para>New session state is introduced, CONNECTEDREADONLY
+                      (ZOO_READONLY_STATE for C binding).  Client will move to
+                      this state when it's connected to a partitioned server
+                      (which automatically implies that only clients with r-o
+                      mode enabled can be in this state). If we're in this
+                      state we can issue only read requests. From this state
+                      session could transition to CONNECTED -- if client's
+                      reconnected to r/w server -- and to all states reachable
+                      from CONNECTED state.</para>
+              </listitem>
+              <listitem>
+                  <para><emphasis role="bold">Session events</emphasis></para>
+                  <para>Default watcher of r-o client will inform application
+                      about mode change from usual to read-only and vice versa,
+                      besides usual notifications like connection
+                      loss.</para>
+              </listitem>
+              <listitem>
+                  <para><emphasis role="bold">Special case of state transitions</emphasis></para>
+                  <para>If the very first server a client connects to is a
+                      partitioned server, the client receives "fake" session id
+                      from it (fake because majority doesn't knows about this
+                      session). When such client eventually connects to r/w
+                      server, it receives valid session id. All this happens
+                      transparently to the users. They should just be aware of
+                      fact that sessionId stored in ZooKeeper object could
+                      change (iff this is fake sessionId; valid sessionId will
+                      never change).</para>
+              </listitem>
+              <listitem>
+                  <para><emphasis role="bold">Watches set in r-o mode</emphasis></para>
+                  <para>Client can safely set watches in r-o mode, with the
+                      only obvious caveat that they will be fired when the
+                      client reconnects to r/w server. So, if client connects
+                      to partitioned server, sets a watch for data changes of
+                      node <emphasis>/a</emphasis>, and meanwhile
+                      <emphasis>/a</emphasis>'s data is changed by majority
+                      servers, watch will be fired when client reconnects to
+                      a majority server.</para>
+              </listitem>
+          </itemizedlist>
+      </section>
+  </section>
+
+  <section id="ch_useCases">
+      <title>Example Use Cases</title>
+      <para>In general, read-only mode is a perfect fit for use cases where you
+          need to be able to read data all the time and can tolerate that it
+          could be stale. For use cases that involve fair amount of write
+          transactions -- i.e. some kind of consensus protocol atop of ZK --
+          read-only mode may not save you completely.</para>
+      <section>
+          <title>Configuration Management</title>
+          <para>A perfect fit. The overall idea remains unchanged. When a
+              client connects to a server it obtains the configuration by
+              reading the content of <emphasis>/path/to/conf</emphasis> node
+              with the watch set to true. When the configuration is updated the
+              client receives notification and re-reads the new configuration,
+              again with watch set to true.</para>
+          <para>Notice however, the server client has connected to can be
+              read-only. If the client connects to read-only server it means
+              retrieved configuration may be outdated and there will be no
+              notifications until the client reconnects to majority server.
+              The application should alert about this situation, i.e. via log
+              or email, and just use obtained configuration. When the client
+              reconnects to majority server eventually, it is notified if
+              there's any change in configuration.</para>
+      </section>
+      <section>
+          <title>Leader Election</title>
+          <para>If you're not familiar with the algorithm, read about it
+              <ulink url="recipes.html#sc_leaderElection">here</ulink>.
+              In any case, to give some context, here's a high-level
+              explanation. Each process creates an ephemeral sequential node
+              under <emphasis>/path/to/election</emphasis> node. If the node
+              the process has created is the lowest node among all children of
+              election node -- the process is leader. Otherwise process watches
+              for deletion of the next node down on the sequence.</para>
+          <para>The considerations you should have with regard to read-only
+              mode are as follows.</para>
+          <itemizedlist>
+              <listitem>
+                  <para><emphasis>If the client connected to read-only
+                          server in the first place.</emphasis> You can't
+                      create a children node under election node. Just
+                      wait until you transition to r/w mode, and then retry to create a node.</para>
+              </listitem>
+              <listitem>
+                  <para><emphasis>If the client went to r/o mode while waiting
+                          for deletion of preceding node.</emphasis> You need
+                      to wait until you go to r/w mode. Upon reconnection there
+                      are 3 possible outcomes. If you don't receive any
+                      notification it means preceding node wasn't deleted, so
+                      you continue to wait. If you receive SESSIONEXPIRED event
+                      it means you were in r/o mode too long and majority has
+                      expired your session. If you receive deletion
+                      notification it means you can take leadership, and in
+                      fact all processes whose nodes are higher than yours are
+                      waiting for you already.</para>
+              </listitem>
+              <listitem>
+                  <para><emphasis>If the client went to r/o mode while
+                          leading.</emphasis> Notice that if you'll be in r/o
+                      mode quite long your session becomes expired for majority
+                      servers. So you have two choices. If you're ok with
+                      having two leaders running simultaneously, just continue
+                      leading. If your session will expire another leader will
+                      be started. If it's required to have no more than one
+                      leader -- stop leading and delete your node when you
+                      transition to r/w mode (if your session is still
+                      active).</para>
+              </listitem>
+          </itemizedlist>
+      </section>
+  </section>
+
+</article>
+

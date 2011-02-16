@@ -55,6 +55,7 @@
       <li><a href="javaExample.html">ZooKeeper Java Example</a> - a simple Zookeeper client appplication, written in Java</li>
       <li><a href="zookeeperTutorial.html">Barrier and Queue Tutorial</a> - sample implementations of barriers and queues</li>  
       <li><a href="recipes.html">ZooKeeper Recipes</a> - higher level solutions to common problems in distributed applications</li>
+      <li><a href="zookeeperReadOnly.html">ZooKeeper Read-Only Mode</a> - read-only access to ZooKeeper service</li>
       </ul>
       </li>
       

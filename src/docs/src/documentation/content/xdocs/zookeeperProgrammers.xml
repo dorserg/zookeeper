@@ -78,7 +78,7 @@
       </listitem>
     </itemizedlist>
 
-    <para>The next four sections provide practical programming
+    <para>The next five sections provide practical programming
     information. These are:</para>
 
     <itemizedlist>
@@ -88,6 +88,10 @@
 
       <listitem>
         <para><xref linkend="ch_bindings" /></para>
+      </listitem>
+
+      <listitem>
+        <para><xref linkend="ch_readOnlyMode" /></para>
       </listitem>
 
       <listitem>
@@ -1422,6 +1426,12 @@ authProvider.2=com.f.MyAuth2
         </para>
       </section>
     </section>
+  </section>
+
+  <section id="ch_readOnlyMode"> <title>ZooKeeper Read-Only Mode</title>
+      <para><emphasis role="bold">New in 3.4.0</emphasis></para>
+      <para>Ability to issue read requests even if ZooKeeper server is
+          partitioned is present and called <ulink url="zookeeperReadOnly.html">Read-Only Mode</ulink></para>
   </section>
 
    <section id="ch_guideToZkOperations">

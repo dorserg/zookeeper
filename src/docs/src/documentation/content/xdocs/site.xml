@@ -44,6 +44,7 @@ See http://forrest.apache.org/docs/linking.html for more info.
     <javaEx    label="Java Example"     href="javaExample.html" />
     <barTutor  label="Barrier and Queue Tutorial" href="zookeeperTutorial.html" />
     <recipes   label="Recipes"		      href="recipes.html" />
+    <roMode    label="Read-Only Mode"     href="zookeeperReadOnly.html" />
   </docs>
   
   <docs label="BookKeeper">
